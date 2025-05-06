@@ -1,0 +1,3 @@
+dataset: "CIFAR100_IR100_NR20_ASymmetric"
+root: "./data"
+
