@@ -1,5 +1,5 @@
-# FACE
+# CACE
 
-Temporary demo for FACE.
+Temporary demo for CACE.
 
-The key code of FACE is in trainer.py (line 520 - line 564).
+The key code of CACE is in trainer.py (line 520 - line 564).
