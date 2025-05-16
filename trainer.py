@@ -532,8 +532,6 @@ class Trainer:
                                     class_id = total_candi[indices[i]].item()
                                 k = int(cls_num_list_epoch[class_id] ** 0.25)
 
-                                if k > self.num_classes / 2:
-                                    k = self.num_classes // 4
                                 prob, pred = output_softmax[i].topk(self.num_classes, 0, True, True)
                                 prob1, pred1 = output2_softmax[i].topk(self.num_classes, 0, True, True)
                                 sum_of_k = prob[:k].sum()
