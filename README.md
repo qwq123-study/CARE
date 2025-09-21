@@ -1,5 +1,6 @@
-# CACE
+# CARE
 
-Temporary demo for CACE.
+Temporary demo for CARE.
 
-The key code of CACE is in trainer.py (line 520 - line 564).
+The key code of CARE is in trainer.py (line 520 - line 564).
+
