@@ -17,6 +17,8 @@ from torchvision import transforms
 
 from clip import clip
 from timm.models.vision_transformer import vit_base_patch16_224, vit_base_patch16_384, vit_large_patch16_224
+from timm.models.mlp_mixer import mixer_b16_224, mixer_l16_224
+
 
 import datasets
 from models import *
@@ -26,10 +28,9 @@ from utils.samplers import DownSampler
 from utils.losses import *
 from utils.evaluator import Evaluator
 from utils.templates import ZEROSHOT_TEMPLATES
-from randaugment import CIFAR10Policy
 from sklearn.manifold import TSNE
 from sklearn.cluster import KMeans
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 from collections import defaultdict
 
 def load_clip_to_cpu(backbone_name, prec):
@@ -53,6 +54,39 @@ def load_clip_to_cpu(backbone_name, prec):
         model.float()
 
     return model
+    
+def load_blip_to_cpu(backbone_name, prec):
+    assert backbone_name.startswith("BLIP-"), f"Backbone name must start with 'BLIP-', got {backbone_name}"
+    model_type = backbone_name[len("BLIP-"):].lower()
+
+    try:
+        from lavis.models import load_model_and_preprocess
+    except ImportError:
+        raise ImportError("please install salesforce-lavis: pip install salesforce-lavis")
+
+    if model_type == "base":
+        model, vis_processors, txt_processors = load_model_and_preprocess(
+            name="blip_feature_extractor",
+            model_type="base",
+            is_eval=True,
+            device="cpu"
+        )
+    elif model_type == "large":
+        model, vis_processors, txt_processors = load_model_and_preprocess(
+            name="blip_feature_extractor",
+            model_type="large",
+            is_eval=True,
+            device="cpu"
+        )
+    else:
+        raise ValueError(f"Unknown BLIP variant: {model_type}")
+
+    if prec == "fp16":
+        model = model.half()
+    else:
+        model = model.float()
+
+    return model
 
 
 def load_vit_to_cpu(backbone_name, prec):
@@ -62,6 +96,12 @@ def load_vit_to_cpu(backbone_name, prec):
         model = vit_base_patch16_384(pretrained=True).eval()
     elif backbone_name == "IN21K-ViT-L/16":
         model = vit_large_patch16_224(pretrained=True).eval()
+    elif backbone_name == "IN21K-Mixer-B/16":
+        model = mixer_b16_224(pretrained=True).eval()
+    elif backbone_name == "IN21K-Mixer-L/16":
+        model = mixer_l16_224(pretrained=True).eval()
+    else:
+        raise ValueError(f"Unknown backbone: {backbone_name}")
 
     assert prec in ["fp16", "fp32", "amp"]
     if prec == "fp16":
@@ -74,7 +114,6 @@ def load_vit_to_cpu(backbone_name, prec):
 class CustomLinear(nn.Module):
     def __init__(self, in_features, out_features, dtype=None):
         super().__init__()
-        # 使用 nn.Parameter 定义权重和偏置
         self.weight = nn.Parameter(torch.empty(in_features, out_features, dtype=dtype))
         self.weight.data.uniform_(-1, 1).renorm_(2, 0, 1e-5).mul_(1e5)
 
@@ -238,7 +277,7 @@ class Trainer:
             assert cfg.backbone.startswith("CLIP")
             print(f"Loading CLIP (backbone: {cfg.backbone})")
             clip_model = load_clip_to_cpu(cfg.backbone, cfg.prec)
-            self.model = ZeroShotCLIP(clip_model)
+            self.model = ZeroShotCLIP(clip_model, self.device)
             self.model.to(self.device)
             self.tuner = None
             self.head = None
@@ -246,6 +285,22 @@ class Trainer:
             template = "a photo of a {}."
             prompts = self.get_tokenized_prompts(classnames, template)
             self.model.init_text_features(prompts)
+
+        elif cfg.backbone.startswith("CLIP-BLIP"):
+            print(f"Loading CLIP-BLIP (backbone: {cfg.backbone})")
+            self.clip_model = load_clip_to_cpu(cfg.backbone1, cfg.prec)
+            cfg.backbone = cfg.backbone1
+            self.model = PeftModelFromCLIP(cfg, self.clip_model, num_classes)
+            self.model.to(self.device)
+            self.tuner = self.model.tuner
+            self.head = self.model.head
+
+            self.blip_model = load_blip_to_cpu(cfg.backbone2, cfg.prec)
+            cfg.backbone = cfg.backbone2    # 切换到 BLIP 分支
+            self.model2 = PeftModelFromCLIP(cfg, self.blip_model, num_classes)
+            self.model2.to(self.device)
+            self.tuner2 = self.model2.tuner
+            self.head2 = self.model2.head
 
         elif cfg.backbone.startswith("CLIP"):
             print(f"Loading CLIP (backbone: {cfg.backbone})")
@@ -255,10 +310,18 @@ class Trainer:
             self.tuner = self.model.tuner
             self.head = self.model.head
 
-        elif cfg.backbone.startswith("IN21K-ViT"):
+        elif cfg.backbone.startswith("BLIP"):
+            print(f"Loading BLIP (backbone: {cfg.backbone})")
+            self.blip_model = load_blip_to_cpu(cfg.backbone, cfg.prec)
+            self.model = PeftModelFromCLIP(cfg, self.blip_model, num_classes)
+            self.model.to(self.device)
+            self.tuner = self.model.tuner
+            self.head = self.model.head
+
+        elif cfg.backbone.startswith("IN21K-ViT") or cfg.backbone.startswith("IN21K-Mixer"):
             print(f"Loading ViT (backbone: {cfg.backbone})")
             vit_model = load_vit_to_cpu(cfg.backbone, cfg.prec)
-            self.model = PeftModelFromViT(cfg, vit_model, num_classes)
+            self.model = PeftModelFromCLIP(cfg, vit_model, num_classes)
             self.model.to(self.device)
             self.tuner = self.model.tuner
             self.head = self.model.head
@@ -298,6 +361,9 @@ class Trainer:
         print("Turning on gradients in the head")
         for name, param in self.head.named_parameters():
             param.requires_grad_(True)
+        # print("Turning on gradients in the model")
+        # for name, param in self.model.named_parameters():
+        #     param.requires_grad_(True)
 
         # print parameters
         total_params = sum(p.numel() for p in self.model.parameters())
@@ -310,8 +376,13 @@ class Trainer:
         #     print(name, param.numel())
 
         # NOTE: only give tuner and head to the optimizer
-        self.optim = torch.optim.SGD([{"params": self.tuner.parameters()},
-                                      {"params": self.head.parameters()}],
+        param_groups = [{"params": self.head.parameters()},
+                        {"params": self.tuner.parameters()}]
+        if hasattr(self, 'head2') and self.head2 is not None:
+            param_groups.append({"params": self.head2.parameters()})
+        if hasattr(self, 'tuner2') and self.tuner2 is not None:
+            param_groups.append({"params": self.tuner2.parameters()})
+        self.optim = torch.optim.SGD(param_groups,
                                       lr=cfg.lr, weight_decay=cfg.weight_decay, momentum=cfg.momentum)
         self.sched = torch.optim.lr_scheduler.CosineAnnealingLR(self.optim, cfg.num_epochs)
         self.scaler = GradScaler() if cfg.prec == "amp" else None
@@ -348,6 +419,29 @@ class Trainer:
         prompts = prompts.to(self.device)
         return prompts
 
+    def get_tokenized_prompts_blip(self, classnames, template):
+        # 1. 拼接文本并替换下划线为空格
+        prompts = [template.format(c.replace("_", " ")) for c in classnames]
+        # print(f"Prompts: {prompts}")
+        
+        # 2. 调用 BLIP 自带的 BERT 分词器
+        tokenized_output = self.blip_model.tokenizer(
+            prompts,
+            padding="max_length",  # 补齐长度，防止不同长度的句子无法组成 batch
+            truncation=True,       # 遇到超长文本自动截断
+            max_length=77,         # ⭐️ 关键：保持与 CLIP 一致的 77 长度，完美骗过框架
+            return_tensors="pt"    # 直接输出 PyTorch 的 tensor
+        )
+        
+        # 3. 提取 input_ids (即 Token ID 张量) 并移动到显卡上
+        prompts_ids = tokenized_output.input_ids.to(self.device)
+        
+        return prompts_ids
+
+    # def get_tokenized_prompts(self, classnames, template):
+    #     prompts = [template.format(c.replace("_", " ")) for c in classnames]
+    #     return prompts  # 返回 list[str]
+
     @torch.no_grad()
     def init_head_text_feat(self):
         cfg = self.cfg
@@ -381,7 +475,10 @@ class Trainer:
             text_features = F.normalize(text_features, dim=-1)
         elif cfg.prompt == "default":
             template = "a photo of a {}."
-            prompts = self.get_tokenized_prompts(classnames, template)
+            if cfg.backbone.startswith("BLIP"):
+                prompts = self.get_tokenized_prompts_blip(classnames, template)
+            else:
+                prompts = self.get_tokenized_prompts(classnames, template)
             text_features = self.model.encode_text(prompts)
             text_features = F.normalize(text_features, dim=-1)
 
@@ -389,8 +486,10 @@ class Trainer:
             text_features = text_features @ self.model.image_encoder.proj.t()
             text_features = F.normalize(text_features, dim=-1)
 
-        self.head.apply_weight(text_features)
         self.text_features = text_features.to(self.device)
+        self.head.apply_weight(self.text_features)
+        # self.head2.apply_weight(self.text_featuresb)
+        # self.text_features = text_features.to(self.device)
 
     @torch.no_grad()
     def init_head_class_mean(self):
@@ -428,6 +527,7 @@ class Trainer:
         class_means = F.normalize(class_means, dim=-1)
 
         self.head.apply_weight(class_means)
+        self.head2.apply_weight(class_means)
 
     @torch.no_grad()
     def init_head_linear_probe(self):
@@ -456,6 +556,43 @@ class Trainer:
 
         self.head.apply_weight(class_weights)
 
+    def compute_candidate_correction(self, epoch_idx, output_softmax, output2_softmax, label, clean_label, indices, candidate_count, total_candi, cls_num_list_epoch):
+        """Update candidate_count based on CLIP, zero-shot."""
+        candidate_count[indices, label] += 1
+
+        diff_zeroshot = 0
+        for i in range(len(indices)):
+            if epoch_idx == 0:
+                class_id = label[i].item()
+            else:
+                class_id = total_candi[indices[i]].item()
+
+            k = int(cls_num_list_epoch[class_id] ** 0.25)
+            if k > self.num_classes / 2:
+                k = self.num_classes // 4
+
+            prob, pred = output_softmax[i].topk(self.num_classes, 0, True, True)
+            prob1, pred1 = output2_softmax[i].topk(self.num_classes, 0, True, True)
+            w = prob[:k].sum()
+            w1 = prob1[:k].sum()
+
+            if pred1[0] != clean_label[i]:
+                diff_zeroshot += 1
+
+            for j in range(k):
+                if label[i] == pred1[j] and label[i] == pred[j]:
+                    candidate_count[indices[i], pred[j]] += (w.item() + w1.item())
+                elif label[i] == pred1[j] and label[i] != pred[j]:
+                    candidate_count[indices[i], pred1[j]] += w1.item()
+                elif label[i] != pred1[j] and label[i] == pred[j]:
+                    candidate_count[indices[i], pred[j]] += w.item()
+                else:
+                    candidate_count[indices[i], pred[j]] += prob[j].item()
+                    candidate_count[indices[i], pred1[j]] += prob1[j].item()
+
+        _, y_candi = torch.max(candidate_count[indices], dim=-1)
+        return y_candi, diff_zeroshot
+
     def train(self):
         cfg = self.cfg
 
@@ -477,12 +614,21 @@ class Trainer:
 
         print(f"Loading CLIP (backbone: {cfg.backbone})")
         clip_model = self.clip_model
-        model2 = ZeroShotCLIP(clip_model)
+        model2 = ZeroShotCLIP(clip_model, self.device)
         model2.to(self.device)
         template = "a photo of a {}."
         classnames = self.classnames
         prompts = self.get_tokenized_prompts(classnames, template)
         model2.init_text_features(prompts)
+
+        # print(f"Loading BLIP (backbone: {cfg.backbone})")
+        # blip_model = self.blip_model
+        # model2 = ZeroShotBLIP(blip_model, self.device)
+        # model2.to(self.device)
+        # template = "a photo of a {}."
+        # classnames = self.classnames
+        # prompts = self.get_tokenized_prompts_blip(classnames, template)
+        # model2.init_text_features(prompts)
 
         candidate_count = torch.zeros(self.num_samples, self.num_classes).cuda()
         total_candi = torch.zeros(self.num_samples).cuda()
@@ -498,6 +644,9 @@ class Trainer:
             end = time.time()
             candidate_count_epoch = candidate_count
 
+            diff_zeroshot = 0
+            obs_cle_diff = np.zeros(self.num_classes, dtype=int).tolist()
+            can_cle_diff = np.zeros(self.num_classes, dtype=int).tolist()
             num_batches = len(self.train_loader)
             for batch_idx, batch in enumerate(self.train_loader):
                 data_time.update(time.time() - end)
@@ -506,68 +655,49 @@ class Trainer:
                 image2 = batch[1].squeeze(1)
                 label = batch[2]
                 indices = batch[3]
+                clean_label = batch[4]
                 image = image.to(self.device)
                 image2 = image2.to(self.device)
-
                 label = label.to(self.device)
 
                 if cfg.prec == "amp":
-                    with ((autocast())):
+                    with (((autocast()))):
                         output = self.model(image)
                         output_softmax = output.softmax(dim=-1)
 
+                        with torch.no_grad():
+                            output2 = model2(image2).to(self.device)
+                            output2_softmax = output2.softmax(dim=-1)
 
-                        if cfg.method:
-                            with torch.no_grad():
-                                output2 = model2(image2).to(self.device)
-                                output2_softmax = output2.softmax(dim=-1)
+                        y_candi, diff_zeroshot = self.compute_candidate_correction(
+                            epoch_idx,
+                            output_softmax,
+                            output2_softmax,
+                            label,
+                            clean_label,
+                            indices,
+                            candidate_count,
+                            total_candi,
+                            cls_num_list_epoch,
+                        )
 
-                            candidate_count[indices, label] += 1
+                        for i in range(len(indices)):
+                            true_label = clean_label[i]
+                            noisy_label = label[i]
+                            pred_label = y_candi[i]
+                            if true_label != pred_label:
+                                can_cle_diff[pred_label.item()] += 1
+                            if true_label != noisy_label:
+                                obs_cle_diff[noisy_label.item()] += 1
 
-                            for i in range(len(indices)):
-                                if epoch_idx == 0:
-                                    # origin
-                                    class_id = label[i].item()
-                                else:
-                                    class_id = total_candi[indices[i]].item()
-                                k = int(cls_num_list_epoch[class_id] ** 0.25)
+                        # 更新类别计数
+                        total_candi = torch.argmax(candidate_count_epoch, dim=-1)
+                        cls_num_list = torch.bincount(total_candi, minlength=self.num_classes).float()
+                        cls_num_list[cls_num_list == 0] = self.cls_num_list[self.num_classes - 1]
+                        cls_num_list_epoch = cls_num_list.tolist()
 
-                                prob, pred = output_softmax[i].topk(self.num_classes, 0, True, True)
-                                prob1, pred1 = output2_softmax[i].topk(self.num_classes, 0, True, True)
-                                sum_of_k = prob[:k].sum()
-                                w = sum_of_k
-                                sum_of_k1 = prob1[:k].sum()
-                                w1 = sum_of_k1
-                                for j in range(k):
-                                    if label[i] == pred1[j] and label[i] == pred[j]:
-                                        candidate_count[indices[i], pred[j]] += (w.item()+w1.item())
 
-                                    if label[i] == pred1[j] and label[i] != pred[j]:
-                                        candidate_count[indices[i], pred1[j]] += w1.item()
-
-                                    if label[i] != pred1[j] and label[i] == pred[j]:
-                                        candidate_count[indices[i], pred[j]] += w.item()
-
-                                    if label[i] != pred1[j] and label[i] != pred[j]:
-                                        candidate_count[indices[i], pred[j]] += prob[j].item()
-                                        candidate_count[indices[i], pred1[j]] += prob1[j].item()
-
-                            max_number, y_candi = torch.max(candidate_count[indices], dim=-1)
-
-                            total_candi = torch.argmax(candidate_count_epoch, dim=-1)
-                            cls_num_list = torch.bincount(total_candi, minlength=self.num_classes).float()
-                            cls_num_list[cls_num_list == 0] = self.cls_num_list[self.num_classes - 1]
-                            cls_num_list_epoch = cls_num_list.tolist()
-
-                            loss = self.criterion(output, y_candi, cls_num_list.cuda())
-                            # loss = self.criterion(output, y_candi)
-
-                            del output2, output2_softmax, prob, pred, prob1, pred1
-                            # gc.collect()
-
-                        else:
-                            loss = self.criterion(output, label, torch.Tensor(self.cls_num_list).to(self.device))
-                            # loss = self.criterion(output, label)
+                        loss = self.criterion(output, y_candi, cls_num_list.cuda())
                         loss_micro = loss / self.accum_step
                         self.scaler.scale(loss_micro).backward()
                     if ((batch_idx + 1) % self.accum_step == 0) or (batch_idx + 1 == num_batches):
@@ -641,6 +771,31 @@ class Trainer:
 
             self.sched.step()
 
+            print("origin noisy rate:", [round(a / b, 2) for a, b in zip(obs_cle_diff, self.cls_num_list)])
+            print("repair noisy rate", [round(a / b, 2) for a, b in zip(can_cle_diff, cls_num_list_epoch)])
+            print("sum_noisy_samples_origin:", sum(obs_cle_diff))
+            print(
+                f"* many: {100*sum([obs_cle_diff[i] for i in self.many_idxs])/sum([self.cls_num_list[i] for i in self.many_idxs]):.1f}%  ")
+            if self.med_idxs.size != 0:
+                print( f"med: {100*sum([obs_cle_diff[i] for i in self.med_idxs])/sum([self.cls_num_list[i] for i in self.med_idxs]):.1f}%  ")
+            if self.few_idxs.size != 0:
+                print(f"few: {100*sum([obs_cle_diff[i] for i in self.few_idxs])/sum([self.cls_num_list[i] for i in self.few_idxs]):.1f}%")
+            print("sum_noisy_samples_repair:", sum(can_cle_diff))
+            print(
+                f"* many: {100 * sum([can_cle_diff[i] for i in self.many_idxs]) / sum([cls_num_list_epoch[i] for i in self.many_idxs]):.1f}%  ")
+            if self.med_idxs.size != 0:
+                print(f"med: {100 * sum([can_cle_diff[i] for i in self.med_idxs]) / sum([cls_num_list_epoch[i] for i in self.med_idxs]):.1f}%  ")
+            if self.few_idxs.size != 0:
+                print(f"few: {100 * sum([can_cle_diff[i] for i in self.few_idxs]) / sum([cls_num_list_epoch[i] for i in self.few_idxs]):.1f}%")
+            print("cls_num_list_clean:", self.clean_cls_num_list)
+            print("cls_num_list_origin:", self.cls_num_list)
+            print("cls_num_list_repair:", cls_num_list_epoch)
+            print("cls_noise_num_list_origin:", obs_cle_diff)
+            print("cls_clean_num_list_origin:", [a - b for a, b in zip(self.cls_num_list, obs_cle_diff)])
+            print("cls_noise_num_list_repair:", can_cle_diff)
+            print("cls_clean_num_list_repair:", [a - b for a, b in zip(cls_num_list_epoch, can_cle_diff)])
+            print("zeroshot_accuracy:", 1-round(diff_zeroshot/self.num_samples, 2))
+
             self.test()
 
             if self.results["mean_acc"] > best_acc:
@@ -651,9 +806,9 @@ class Trainer:
 
             print("*" * 50)
             print("best_epoch_idx:", best_epoch_idx)
-            print(f"* best average: {best_result["mean_acc"]:.1f}%")
+            print(f"* best average: {best_result['mean_acc']:.1f}%")
             print(
-                f"* many: {best_result["many_acc"]:.1f}%  med: {best_result["med_acc"]:.1f}%  few: {best_result["few_acc"]:.1f}%")
+                f"* many: {best_result['many_acc']:.1f}%  med: {best_result['med_acc']:.1f}%  few: {best_result['few_acc']:.1f}%")
 
 
         print("Finish training")
@@ -671,8 +826,8 @@ class Trainer:
         # self.test()
         print("*"*50)
         print("best result:")
-        print(f"* average: {best_result["mean_acc"]:.1f}%")
-        print(f"* many: {best_result["many_acc"]:.1f}%  med: {best_result["med_acc"]:.1f}%  few: {best_result["few_acc"]:.1f}%")
+        print(f"* average: {best_result['mean_acc']:.1f}%")
+        print(f"* many: {best_result['many_acc']:.1f}%  med: {best_result['med_acc']:.1f}%  few: {best_result['few_acc']:.1f}%")
 
         # Close writer
         self._writer.close()
@@ -758,8 +913,10 @@ class Trainer:
     def save_model(self, directory):
         tuner_dict = self.tuner.state_dict()
         head_dict = self.head.state_dict()
+        # model_dict = self.model.state_dict()
         checkpoint = {
             "tuner": tuner_dict,
+            # "model": model_dict,
             "head": head_dict
         }
 
