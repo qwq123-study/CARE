@@ -7,6 +7,8 @@ _C.root = ""  # Directory where datasets are stored
 _C.imb_factor = None  # for long-tailed cifar dataset
 
 _C.backbone = ""
+_C.backbone1 = ""
+_C.backbone2 = ""
 _C.resolution = 224
 
 _C.output_dir = None  # Directory to save the output files (like log.txt and model weights)
