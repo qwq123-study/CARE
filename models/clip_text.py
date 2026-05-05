@@ -27,3 +27,35 @@ class CLIP_Text(nn.Module):
         x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
 
         return x
+
+
+import numpy as np
+
+class GloVe_Text(nn.Module):
+    def __init__(self, glove_path='glove.6B.300d.txt'):
+        super().__init__()
+        self.embedding_dim = 300
+        self.glove_dict = self.load_glove(glove_path)
+
+    def load_glove(self, path):
+        glove = {}
+        with open(path, 'r', encoding='utf8') as f:
+            for line in f:
+                values = line.strip().split()
+                word = values[0]
+                vector = np.asarray(values[1:], dtype='float32')
+                glove[word] = vector
+        return glove
+
+    def encode_text(self, text):
+        words = text.lower().split()
+        vecs = [self.glove_dict[w] for w in words if w in self.glove_dict]
+        if vecs:
+            return torch.tensor(np.mean(vecs, axis=0), dtype=torch.float32)
+        else:
+            return torch.zeros(self.embedding_dim, dtype=torch.float32)
+
+    def forward(self, text_list):
+        embeddings = [self.encode_text(label) for label in text_list]
+        return torch.stack(embeddings).to(torch.float32)  # (C, D)
+
