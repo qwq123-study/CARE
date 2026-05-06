@@ -1,6 +1,6 @@
 # CARE: Class-Adaptive Expert Consensus for Reliable Learning with Long-Tailed Noisy Labels
 
-This is the source code for the paper: [CARE: Class-Adaptive Expert Consensus for Reliable Learning with Long-Tailed Noisy Labels](ICML 2026).
+This is the source code for the paper: [CARE: Class-Adaptive Expert Consensus for Reliable Learning with Long-Tailed Noisy Labels][https://icml.cc/virtual/2026/poster/65515](ICML 2026).
 
 ## Requirements
 
