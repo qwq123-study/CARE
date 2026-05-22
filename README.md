@@ -73,6 +73,8 @@ We thank the authors for the following repositories for code reference:
 
 ## You May Find Our Additional Works of Interest
 
+* [CVM'26] Learning from Imperfect Text Guidance: Robust Long-Tail Visual Recognition with High-Noise Label [[paper](https://arxiv.org/abs/2604.23125)] [[code](https://github.com/qwq123-study/WTS)]
+
 * [CVPR'22] Long-Tailed Visual Recognition via Gaussian Clouded Logit Adjustment [[paper](https://openaccess.thecvf.com/content/CVPR2022/papers/Li_Long-Tailed_Visual_Recognition_via_Gaussian_Clouded_Logit_Adjustment_CVPR_2022_paper.pdf)] [[code](https://github.com/Keke921/GCLLoss)]
 
 * [TPAMI'23] Key Point Sensitive Loss for Long-Tailed Visual Recognition [[paper](https://drive.google.com/file/d/1gOJDHBJ_M7RmU6Iw2p6uXIyo8pNgVMrv/view?pli=1)] [[code](https://github.com/Keke921/KPSLoss)]
