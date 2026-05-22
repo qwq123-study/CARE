@@ -78,7 +78,7 @@ If you find this repo useful for your work, please cite as:
 ```bibtex
 @inproceedings{li2026care,
   title={CARE: Class-Adaptive Expert Consensus for Reliable Learning with Long-Tailed Noisy Labels},
-  author={Meng-Ke Li and Hai-Quan Ling and Li-Hao Chen and Yang Lu and Yi-Qun Zhang and Hui Huang},
+  author={Mengke Li and Haiquan Ling and Lihao Chen and Yang Lu and Yiqun Zhang and Hui Huang},
   booktitle={Proceedings of the 43st International Conference on Machine Learning},
   year={2026}
 }
